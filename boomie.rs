@@ -14,10 +14,10 @@
 // THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 
-use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
+use std::collections::{HashMap, VecDeque};
 use cpal::traits::{DeviceTrait, HostTrait};
 use cpal::StreamConfig;
 
@@ -79,6 +79,76 @@ pub enum InstrumentSource {
 }
 
 #[derive(Debug, Clone)]
+pub struct ReverbParams {
+    pub room_size: f32,
+    pub damping: f32,
+    pub wet: f32,
+    pub width: f32,
+}
+
+impl Default for ReverbParams {
+    fn default() -> Self {
+        ReverbParams {
+            room_size: 0.5,
+            damping: 0.5,
+            wet: 0.3,
+            width: 1.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DelayParams {
+    pub time: f32,
+    pub feedback: f32,
+    pub wet: f32,
+}
+
+impl Default for DelayParams {
+    fn default() -> Self {
+        DelayParams {
+            time: 0.25,
+            feedback: 0.4,
+            wet: 0.3,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DistortionParams {
+    pub drive: f32,
+    pub tone: f32,
+    pub wet: f32,
+}
+
+impl Default for DistortionParams {
+    fn default() -> Self {
+        DistortionParams {
+            drive: 2.0,
+            tone: 0.7,
+            wet: 0.5,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct EffectsChain {
+    pub reverb: Option<ReverbParams>,
+    pub delay: Option<DelayParams>,
+    pub distortion: Option<DistortionParams>,
+}
+
+impl Default for EffectsChain {
+    fn default() -> Self {
+        EffectsChain {
+            reverb: None,
+            delay: None,
+            distortion: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct Instrument {
     pub name: String,
     pub source: InstrumentSource,
@@ -88,6 +158,7 @@ pub struct Instrument {
     pub release: f32,
     pub volume: f32,
     pub pitch: f32,
+    pub effects: EffectsChain,
 }
 
 impl Default for Instrument {
@@ -101,6 +172,7 @@ impl Default for Instrument {
             release: 0.2,
             volume: 0.5,
             pitch: 1.0,
+            effects: EffectsChain::default(),
         }
     }
 }
@@ -174,6 +246,34 @@ impl MelodyTrack {
                     track.notes.push(Note { pitch, duration, velocity });
                     track.length += duration;
                 }
+            } else if let Some(v) = line.strip_prefix("reverb:") {
+                let parts: Vec<&str> = v.split(',').map(|s| s.trim()).collect();
+                if parts.len() >= 4 {
+                    track.instrument.effects.reverb = Some(ReverbParams {
+                        room_size: parts[0].parse().unwrap_or(0.5),
+                        damping: parts[1].parse().unwrap_or(0.5),
+                        wet: parts[2].parse().unwrap_or(0.3),
+                        width: parts[3].parse().unwrap_or(1.0),
+                    });
+                }
+            } else if let Some(v) = line.strip_prefix("delay:") {
+                let parts: Vec<&str> = v.split(',').map(|s| s.trim()).collect();
+                if parts.len() >= 3 {
+                    track.instrument.effects.delay = Some(DelayParams {
+                        time: parts[0].parse().unwrap_or(0.25),
+                        feedback: parts[1].parse().unwrap_or(0.4),
+                        wet: parts[2].parse().unwrap_or(0.3),
+                    });
+                }
+            } else if let Some(v) = line.strip_prefix("distortion:") {
+                let parts: Vec<&str> = v.split(',').map(|s| s.trim()).collect();
+                if parts.len() >= 3 {
+                    track.instrument.effects.distortion = Some(DistortionParams {
+                        drive: parts[0].parse().unwrap_or(2.0),
+                        tone: parts[1].parse().unwrap_or(0.7),
+                        wet: parts[2].parse().unwrap_or(0.5),
+                    });
+                }
             } else {
                 parse_field!(line, "tempo:", track.tempo);
                 parse_field!(line, "volume:", track.instrument.volume);
@@ -235,6 +335,127 @@ impl Arrangement {
         }
 
         Ok(arrangement)
+    }
+}
+
+pub struct EffectsProcessor {
+    sample_rate: f32,
+    comb_buffers: Vec<VecDeque<f32>>,
+    comb_filter_state: Vec<f32>,
+    allpass_buffers: Vec<VecDeque<f32>>,
+    delay_buffer: VecDeque<f32>,
+    lowpass_state: f32,
+}
+
+impl EffectsProcessor {
+    pub fn new(sample_rate: f32) -> Self {
+        let scale = sample_rate / 44100.0;
+        let comb_delays = vec![
+            (1116.0 * scale) as usize,
+            (1188.0 * scale) as usize,
+            (1277.0 * scale) as usize,
+            (1356.0 * scale) as usize,
+            (1422.0 * scale) as usize,
+            (1491.0 * scale) as usize,
+            (1557.0 * scale) as usize,
+            (1617.0 * scale) as usize,
+        ];
+
+        let allpass_delays = vec![
+            (556.0 * scale) as usize,
+            (441.0 * scale) as usize,
+            (341.0 * scale) as usize,
+            (225.0 * scale) as usize,
+        ];
+
+        EffectsProcessor {
+            sample_rate,
+            comb_buffers: comb_delays.iter()
+                .map(|&size| VecDeque::from(vec![0.0; size]))
+                .collect(),
+            comb_filter_state: vec![0.0; 8],
+            allpass_buffers: allpass_delays.iter()
+                .map(|&size| VecDeque::from(vec![0.0; size]))
+                .collect(),
+            delay_buffer: VecDeque::from(vec![0.0; (sample_rate * 2.0) as usize]),
+            lowpass_state: 0.0,
+        }
+    }
+
+    pub fn process(&mut self, input: f32, effects: &EffectsChain) -> f32 {
+        let mut output = input;
+
+        if let Some(dist) = &effects.distortion {
+            output = self.apply_distortion(output, dist);
+        }
+
+        if let Some(delay) = &effects.delay {
+            output = self.apply_delay(output, delay);
+        }
+
+        if let Some(reverb) = &effects.reverb {
+            output = self.apply_reverb(output, reverb);
+        }
+
+        output
+    }
+
+    fn apply_distortion(&mut self, input: f32, params: &DistortionParams) -> f32 {
+        let driven = input * params.drive;
+        let distorted = if driven > 1.0 {
+            2.0 / 3.0
+        } else if driven < -1.0 {
+            -2.0 / 3.0
+        } else {
+            driven - (driven.powi(3) / 3.0)
+        };
+
+        let alpha = 1.0 - params.tone;
+        self.lowpass_state = self.lowpass_state * alpha + distorted * (1.0 - alpha);
+
+        input * (1.0 - params.wet) + self.lowpass_state * params.wet
+    }
+
+    fn apply_delay(&mut self, input: f32, params: &DelayParams) -> f32 {
+        let delay_samples = (params.time * self.sample_rate) as usize;
+        let delay_samples = delay_samples.min(self.delay_buffer.len() - 1);
+
+        let delayed = self.delay_buffer[delay_samples];
+
+        self.delay_buffer.pop_back();
+        self.delay_buffer.push_front(input + delayed * params.feedback);
+
+        input * (1.0 - params.wet) + delayed * params.wet
+    }
+
+    fn apply_reverb(&mut self, input: f32, params: &ReverbParams) -> f32 {
+        let mut output = 0.0;
+
+        for i in 0..8 {
+            let delayed = self.comb_buffers[i].back().copied().unwrap_or(0.0);
+            
+            self.comb_filter_state[i] = delayed * (1.0 - params.damping) + 
+                                        self.comb_filter_state[i] * params.damping;
+            
+            let feedback = self.comb_filter_state[i] * params.room_size;
+            
+            self.comb_buffers[i].pop_back();
+            self.comb_buffers[i].push_front(input + feedback);
+            
+            output += delayed;
+        }
+
+        output /= 8.0;
+
+        for buffer in &mut self.allpass_buffers {
+            let delayed = buffer.back().copied().unwrap_or(0.0);
+            let new_val = output + delayed * 0.5;
+            buffer.pop_back();
+            buffer.push_front(new_val);
+            output = delayed - output * 0.5;
+        }
+
+        input * (1.0 - params.wet) + output * params.wet
     }
 }
 
@@ -308,7 +529,29 @@ impl SynthEngine {
 
         for (track, start_time) in &arrangement.tracks {
             let start_sample = (start_time * self.sample_rate) as usize;
-            self.synthesize_track_into(&mut buffer, track, start_sample);
+            
+            let track_samples = (track.length * self.sample_rate) as usize;
+            let mut track_buffer = vec![0.0; track_samples];
+            
+            self.synthesize_track_into(&mut track_buffer, track, 0);
+            
+            if track.instrument.effects.reverb.is_some() || 
+               track.instrument.effects.delay.is_some() || 
+               track.instrument.effects.distortion.is_some() {
+                
+                let mut processor = EffectsProcessor::new(self.sample_rate);
+                
+                for sample in track_buffer.iter_mut() {
+                    *sample = processor.process(*sample, &track.instrument.effects);
+                }
+            }
+            
+            for (i, sample) in track_buffer.iter().enumerate() {
+                let buf_idx = start_sample + i;
+                if buf_idx < buffer.len() {
+                    buffer[buf_idx] += sample;
+                }
+            }
         }
 
         if let Some(max) = buffer.iter().map(|v| v.abs()).max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)) {
