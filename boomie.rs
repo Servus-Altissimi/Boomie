@@ -52,7 +52,7 @@ pub enum WaveformType {
 }
 
 impl WaveformType {
-    fn generate_sample(&self, phase: f32) -> f32 { /// Phase should be in the range [0.0, 1.0)
+    fn generate_sample(&self, phase: f32) -> f32 { // Phase should be in the range [0.0, 1.0)
         match self {
             WaveformType::Sine => (phase * std::f32::consts::TAU).sin(),
             WaveformType::Square => if (phase * 2.0) % 1.0 < 0.5 { 1.0 } else { -1.0 },
@@ -138,6 +138,13 @@ pub struct EffectsChain {
     pub distortion: Option<DistortionParams>,
 }
 
+impl EffectsChain {
+    pub fn has_any(&self) -> bool {
+        self.reverb.is_some() || self.delay.is_some() || self.distortion.is_some()
+    }
+}
+
+
 impl Default for EffectsChain {
     fn default() -> Self {
         EffectsChain {
@@ -182,6 +189,17 @@ pub struct Note {
     pub pitch: f32,
     pub duration: f32,
     pub velocity: f32,
+}
+
+
+#[derive(Debug, Clone, Default)]
+pub struct TrackOverrides {
+    pub volume: Option<f32>,
+    pub pitch: Option<f32>,
+    pub tempo: Option<f32>,
+    pub reverb: Option<ReverbParams>,
+    pub delay: Option<DelayParams>,
+    pub distortion: Option<DistortionParams>,
 }
 
 #[derive(Debug, Clone)]
@@ -292,7 +310,7 @@ impl MelodyTrack {
 #[derive(Debug, Clone)]
 pub struct Arrangement {
     pub name: String,
-    pub tracks: Vec<(MelodyTrack, f32)>,
+    pub tracks: Vec<(MelodyTrack, f32, TrackOverrides)>,  // TrackOverrides
     pub total_length: f32,
 }
 
@@ -319,8 +337,67 @@ impl Arrangement {
                     let start_time: f32 = parts[1].parse()
                         .map_err(|_| SynthError::ParseError("Invalid start time".to_string()))?;
                     
+                    let mut overrides = TrackOverrides::default();
+                    
+                    for override_str in parts.iter().skip(2) {
+                        if let Some((key, val)) = override_str.split_once('=') {
+                            let key = key.trim();
+                            let val = val.trim();
+                            
+                            match key {
+                                "volume" | "vol" => {
+                                    overrides.volume = val.parse().ok();
+                                }
+                                "pitch" => {
+                                    overrides.pitch = val.parse().ok();
+                                }
+                                "tempo" => {
+                                    overrides.tempo = val.parse().ok();
+                                }
+                                "reverb" => {
+                                    let vals: Vec<&str> = val.split(':').collect();
+                                    if vals.len() >= 4 {
+                                        overrides.reverb = Some(ReverbParams {
+                                            room_size: vals[0].parse().unwrap_or(0.5),
+                                            damping: vals[1].parse().unwrap_or(0.5),
+                                            wet: vals[2].parse().unwrap_or(0.3),
+                                            width: vals[3].parse().unwrap_or(1.0),
+                                        });
+                                    }
+                                }
+                                "delay" => {
+                                    let vals: Vec<&str> = val.split(':').collect();
+                                    if vals.len() >= 3 {
+                                        overrides.delay = Some(DelayParams {
+                                            time: vals[0].parse().unwrap_or(0.25),
+                                            feedback: vals[1].parse().unwrap_or(0.4),
+                                            wet: vals[2].parse().unwrap_or(0.3),
+                                        });
+                                    }
+                                }
+                                "distortion" | "dist" => {
+                                    let vals: Vec<&str> = val.split(':').collect();
+                                    if vals.len() >= 3 {
+                                        overrides.distortion = Some(DistortionParams {
+                                            drive: vals[0].parse().unwrap_or(2.0),
+                                            tone: vals[1].parse().unwrap_or(0.7),
+                                            wet: vals[2].parse().unwrap_or(0.5),
+                                        });
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    
                     if let Some(track) = mel_cache.get(mel_file) {
-                        arrangement.tracks.push((track.clone(), start_time));
+                        let mut modified_track = track.clone();
+                        
+                        if overrides.tempo.is_some() {
+                            modified_track.tempo = overrides.tempo.unwrap();
+                        }
+                        
+                        arrangement.tracks.push((modified_track, start_time, overrides));
                         let end_time = start_time + track.length;
                         if end_time > arrangement.total_length {
                             arrangement.total_length = end_time;
@@ -349,8 +426,8 @@ pub struct EffectsProcessor {
 
 impl EffectsProcessor {
     pub fn new(sample_rate: f32) -> Self {
-        let scale = sample_rate / 44100.0;
-        let comb_delays = vec![
+        let scale = sample_rate / 44100.0; 
+        let comb_delays = vec![ // Freeverb design 
             (1116.0 * scale) as usize,
             (1188.0 * scale) as usize,
             (1277.0 * scale) as usize,
@@ -522,48 +599,49 @@ impl SynthEngine {
             .map_err(|e| SynthError::FileError(e.to_string()))?;
         Arrangement::from_bmi(&content, &self.mel_cache)
     }
-
+    
     pub fn synthesize_arrangement(&self, arrangement: &Arrangement) -> Result<Vec<f32>, SynthError> {
         let total_samples = (arrangement.total_length * self.sample_rate) as usize;
         let mut buffer = vec![0.0; total_samples];
 
-        for (track, start_time) in &arrangement.tracks {
+        for (track, start_time, overrides) in &arrangement.tracks {
             let start_sample = (start_time * self.sample_rate) as usize;
-            
-            let track_samples = (track.length * self.sample_rate) as usize;
-            let mut track_buffer = vec![0.0; track_samples];
-            
-            self.synthesize_track_into(&mut track_buffer, track, 0);
-            
-            if track.instrument.effects.reverb.is_some() || 
-               track.instrument.effects.delay.is_some() || 
-               track.instrument.effects.distortion.is_some() {
-                
-                let mut processor = EffectsProcessor::new(self.sample_rate);
-                
-                for sample in track_buffer.iter_mut() {
-                    *sample = processor.process(*sample, &track.instrument.effects);
+            let mut t = track.clone();
+
+            // Apply overrides
+            if let Some(v) = overrides.volume { t.instrument.volume = v; }
+            if let Some(p) = overrides.pitch { t.instrument.pitch = p; }
+            if let Some(tm) = overrides.tempo { t.tempo = tm; }
+            if let Some(r) = &overrides.reverb { t.instrument.effects.reverb = Some(r.clone()); }
+            if let Some(d) = &overrides.delay { t.instrument.effects.delay = Some(d.clone()); }
+            if let Some(x) = &overrides.distortion { t.instrument.effects.distortion = Some(x.clone()); }
+
+            let mut track_buf = vec![0.0; (t.length * self.sample_rate) as usize];
+            self.synthesize_track_into(&mut track_buf, &t, 0);
+
+            if t.instrument.effects.has_any() {
+                let mut fx = EffectsProcessor::new(self.sample_rate);
+                for s in track_buf.iter_mut() {
+                    *s = fx.process(*s, &t.instrument.effects);
                 }
             }
-            
-            for (i, sample) in track_buffer.iter().enumerate() {
-                let buf_idx = start_sample + i;
-                if buf_idx < buffer.len() {
-                    buffer[buf_idx] += sample;
+
+            // Mix into main buffer
+            for (i, &s) in track_buf.iter().enumerate() {
+                if let Some(dst) = buffer.get_mut(start_sample + i) {
+                    *dst += s;
                 }
             }
         }
 
-        if let Some(max) = buffer.iter().map(|v| v.abs()).max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)) {
-            if max > 1.0 {
-                for sample in &mut buffer {
-                    *sample /= max;
-                }
-            }
+        // Normalize
+        if let Some(max) = buffer.iter().map(|v| v.abs()).max_by(|a,b| a.partial_cmp(b).unwrap()) {
+            if max > 1.0 { buffer.iter_mut().for_each(|s| *s /= max); }
         }
 
         Ok(buffer)
     }
+
 
     fn synthesize_track_into(&self, buffer: &mut [f32], track: &MelodyTrack, start_sample: usize) {
         let mut current_sample = 0usize;
@@ -641,8 +719,8 @@ impl SynthEngine {
         }
     }
 
-    fn calculate_envelope(&self, time: f32, duration: f32, instr: &Instrument) -> f32 { /// Generate ADSR envelope value at a set time
-        let attack_end = instr.attack;
+    // Generate ADSR envelope value at a set time
+    fn calculate_envelope(&self, time: f32, duration: f32, instr: &Instrument) -> f32 {        let attack_end = instr.attack;
         let decay_end = attack_end + instr.decay;
         let release_start = duration - instr.release;
 
