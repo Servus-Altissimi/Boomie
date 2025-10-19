@@ -1,5 +1,5 @@
 //  ______   _______  _______  _______ _________ _______ 
-// (  ___ \ (  ___  )(  ___  )(       )\__   __/(  ____ \
+// (  ___ \ (  ___  )(  ___  |(       )\__   __/(  ____ \
 // | (   ) )| (   ) || (   ) || () () |   ) (   | (    \/
 // | (__/ / | |   | || |   | || || || |   | |   | (__    
 // |  __ (  | |   | || |   | || |(_)| |   | |   |  __)   
@@ -13,13 +13,12 @@
 // The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
 // THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-
 use std::error::Error;
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::collections::{HashMap, VecDeque};
-use cpal::traits::{DeviceTrait, HostTrait};
-use cpal::StreamConfig;
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::{StreamConfig, Stream};
 
 impl std::error::Error for SynthError {}
 
@@ -203,12 +202,19 @@ pub struct TrackOverrides {
 }
 
 #[derive(Debug, Clone)]
+pub struct LoopPoint {
+    pub start: f32,
+    pub end: f32,
+}
+
+#[derive(Debug, Clone)]
 pub struct MelodyTrack {
     pub name: String,
     pub instrument: Instrument,
     pub notes: Vec<Note>,
     pub tempo: f32,
     pub length: f32,
+    pub loop_point: Option<LoopPoint>,
 }
 
 impl MelodyTrack {
@@ -219,6 +225,7 @@ impl MelodyTrack {
             notes: Vec::new(),
             tempo: 120.0,
             length: 0.0,
+            loop_point: None,
         };
 
         macro_rules! parse_field {
@@ -237,6 +244,14 @@ impl MelodyTrack {
 
             if let Some(v) = line.strip_prefix("name:") {
                 track.name = v.trim().to_string();
+            } else if let Some(v) = line.strip_prefix("loop:") {
+                let parts: Vec<&str> = v.split(',').map(|s| s.trim()).collect();
+                if parts.len() >= 2 {
+                    track.loop_point = Some(LoopPoint {
+                        start: parts[0].parse().unwrap_or(0.0),
+                        end: parts[1].parse().unwrap_or(track.length),
+                    });
+                }
             } else if let Some(v) = line.strip_prefix("sample:") {
                 track.instrument.source = InstrumentSource::Sample(
                     sample_cache.get(v.trim())
@@ -312,6 +327,7 @@ pub struct Arrangement {
     pub name: String,
     pub tracks: Vec<(MelodyTrack, f32, TrackOverrides)>,  // TrackOverrides
     pub total_length: f32,
+    pub loop_point: Option<LoopPoint>,
 }
 
 impl Arrangement {
@@ -320,6 +336,7 @@ impl Arrangement {
             name: "song".to_string(),
             tracks: Vec::new(),
             total_length: 0.0,
+            loop_point: None,
         };
 
         for line in content.lines() {
@@ -330,6 +347,14 @@ impl Arrangement {
 
             if let Some(value) = line.strip_prefix("name:") {
                 arrangement.name = value.trim().to_string();
+            } else if let Some(value) = line.strip_prefix("loop:") {
+                let parts: Vec<&str> = value.split(',').map(|s| s.trim()).collect();
+                if parts.len() >= 2 {
+                    arrangement.loop_point = Some(LoopPoint {
+                        start: parts[0].parse().unwrap_or(0.0),
+                        end: parts[1].parse().unwrap_or(arrangement.total_length),
+                    });
+                }
             } else if let Some(value) = line.strip_prefix("track:") {
                 let parts: Vec<&str> = value.split(',').map(|s| s.trim()).collect();
                 if parts.len() >= 2 {
@@ -403,12 +428,17 @@ impl Arrangement {
                             arrangement.total_length = end_time;
                         }
                     } else {
-                        return Err(SynthError::InvalidInstrument(
-                            format!("Track not found: {}", mel_file)
-                        ));
+                        eprintln!("Warning: Track not found in cache: \'{}\' Skipping track", mel_file);
                     }
                 }
             }
+        }
+
+        // Return error only if the arrangement has no valid tracks
+        if arrangement.tracks.is_empty() {
+            return Err(SynthError::InvalidInstrument(
+                "Arrangement has no valid tracks".to_string()
+            ));
         }
 
         Ok(arrangement)
@@ -499,8 +529,7 @@ impl EffectsProcessor {
 
         let delayed = self.delay_buffer[delay_samples];
 
-        self.delay_buffer.pop_back();
-        self.delay_buffer.push_front(input + delayed * params.feedback);
+        Self::cycle_buffer(&mut self.delay_buffer, input + delayed * params.feedback);
 
         input * (1.0 - params.wet) + delayed * params.wet
     }
@@ -516,8 +545,7 @@ impl EffectsProcessor {
             
             let feedback = self.comb_filter_state[i] * params.room_size;
             
-            self.comb_buffers[i].pop_back();
-            self.comb_buffers[i].push_front(input + feedback);
+            Self::cycle_buffer(&mut self.comb_buffers[i], input + feedback);
             
             output += delayed;
         }
@@ -527,13 +555,61 @@ impl EffectsProcessor {
         for buffer in &mut self.allpass_buffers {
             let delayed = buffer.back().copied().unwrap_or(0.0);
             let new_val = output + delayed * 0.5;
-            buffer.pop_back();
-            buffer.push_front(new_val);
+            Self::cycle_buffer(buffer, new_val);
             output = delayed - output * 0.5;
         }
 
         input * (1.0 - params.wet) + output * params.wet
     }
+
+    #[inline]
+    fn cycle_buffer(buffer: &mut VecDeque<f32>, new_value: f32) {
+        buffer.pop_back();
+        buffer.push_front(new_value);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PlaybackState {
+    Stopped,
+    Playing,
+    Paused,
+}
+
+pub struct DynamicParameters {
+    pub master_volume: f32,
+    pub master_pitch: f32,
+    pub track_volumes: HashMap<String, f32>,
+    pub track_enabled: HashMap<String, bool>,
+    pub crossfade_duration: f32,
+}
+
+impl Default for DynamicParameters {
+    fn default() -> Self {
+        DynamicParameters {
+            master_volume: 1.0,
+            master_pitch: 1.0,
+            track_volumes: HashMap::new(),
+            track_enabled: HashMap::new(),
+            crossfade_duration: 1.0,
+        }
+    }
+}
+
+struct PlaybackContext {
+    arrangement: Arrangement,
+    current_sample: usize,
+    state: PlaybackState,
+    loop_enabled: bool,
+    dynamic_params: DynamicParameters,
+    param_interpolators: HashMap<String, f32>,
+    crossfade_state: Option<CrossfadeState>,
+}
+
+struct CrossfadeState {
+    target_arrangement: Arrangement,
+    progress: f32,
+    duration_samples: usize,
 }
 
 pub struct SynthEngine {
@@ -541,6 +617,8 @@ pub struct SynthEngine {
     sample_cache: HashMap<String, SampleData>,
     stream_config: StreamConfig,
     sample_rate: f32,
+    playback_context: Arc<Mutex<Option<PlaybackContext>>>,
+    stream: Option<Stream>,
 }
 
 impl SynthEngine {
@@ -557,6 +635,8 @@ impl SynthEngine {
             sample_cache: HashMap::new(),
             stream_config: stream_config.clone(),
             sample_rate: stream_config.sample_rate.0 as f32,
+            playback_context: Arc::new(Mutex::new(None)),
+            stream: None,
         })
     }
 
@@ -599,38 +679,345 @@ impl SynthEngine {
             .map_err(|e| SynthError::FileError(e.to_string()))?;
         Arrangement::from_bmi(&content, &self.mel_cache)
     }
+
+    pub fn play_arrangement(&mut self, arrangement: Arrangement) -> Result<(), SynthError> {
+        self.stop();
+        
+        let mut context = PlaybackContext {
+            arrangement,
+            current_sample: 0,
+            state: PlaybackState::Playing,
+            loop_enabled: false,
+            dynamic_params: DynamicParameters::default(),
+            param_interpolators: HashMap::new(),
+            crossfade_state: None,
+        };
+        
+        for (track, _, _) in &context.arrangement.tracks {
+            context.dynamic_params.track_enabled.insert(track.name.clone(), true);
+            context.dynamic_params.track_volumes.insert(track.name.clone(), 1.0);
+        }
+        
+        *self.playback_context.lock().unwrap() = Some(context);
+        self.start_stream()?;
+        
+        Ok(())
+    }
+
+    pub fn crossfade_to(&mut self, new_arrangement: Arrangement, duration: f32) -> Result<(), SynthError> {
+        {
+            let mut ctx_lock = self.playback_context.lock().unwrap();
+
+            if let Some(ctx) = ctx_lock.as_mut() {
+                ctx.crossfade_state = Some(CrossfadeState {
+                    target_arrangement: new_arrangement,
+                    progress: 0.0,
+                    duration_samples: (duration * self.sample_rate) as usize,
+                });
+                return Ok(());
+            }
+        }
+
+        self.play_arrangement(new_arrangement)?;
+        Ok(())
+    }
+
+    pub fn set_loop_enabled(&self, enabled: bool) {
+        if let Some(ctx) = self.playback_context.lock().unwrap().as_mut() {
+            ctx.loop_enabled = enabled;
+        }
+    }
+
+    pub fn pause(&self) {
+        if let Some(ctx) = self.playback_context.lock().unwrap().as_mut() {
+            if ctx.state == PlaybackState::Playing {
+                ctx.state = PlaybackState::Paused;
+            }
+        }
+    }
+
+    pub fn resume(&self) {
+        if let Some(ctx) = self.playback_context.lock().unwrap().as_mut() {
+            if ctx.state == PlaybackState::Paused {
+                ctx.state = PlaybackState::Playing;
+            }
+        }
+    }
+
+    pub fn stop(&mut self) {
+        if let Some(stream) = self.stream.take() {
+            drop(stream);
+        }
+        *self.playback_context.lock().unwrap() = None;
+    }
+
+    pub fn set_master_volume(&self, volume: f32) {
+        if let Some(ctx) = self.playback_context.lock().unwrap().as_mut() {
+            ctx.dynamic_params.master_volume = volume.max(0.0).min(2.0);
+        }
+    }
+
+    pub fn set_master_pitch(&self, pitch: f32) {
+        if let Some(ctx) = self.playback_context.lock().unwrap().as_mut() {
+            ctx.dynamic_params.master_pitch = pitch.max(0.5).min(2.0);
+        }
+    }
+
+    pub fn set_track_enabled(&self, track_name: &str, enabled: bool) {
+        if let Some(ctx) = self.playback_context.lock().unwrap().as_mut() {
+            ctx.dynamic_params.track_enabled.insert(track_name.to_string(), enabled);
+        }
+    }
+
+    pub fn set_track_volume(&self, track_name: &str, volume: f32) {
+        if let Some(ctx) = self.playback_context.lock().unwrap().as_mut() {
+            ctx.dynamic_params.track_volumes.insert(track_name.to_string(), volume.max(0.0).min(2.0));
+        }
+    }
+
+    pub fn interpolate_track_volume(&self, track_name: &str, target: f32, duration: f32) {
+        if let Some(ctx) = self.playback_context.lock().unwrap().as_mut() {
+            let key = format!("vol_{}", track_name);
+            ctx.param_interpolators.insert(key, duration);
+            ctx.dynamic_params.track_volumes.insert(track_name.to_string(), target);
+        }
+    }
+
+    pub fn get_playback_position(&self) -> f32 {
+        if let Some(ctx) = self.playback_context.lock().unwrap().as_ref() {
+            ctx.current_sample as f32 / self.sample_rate
+        } else {
+            0.0
+        }
+    }
+
+    pub fn get_playback_state(&self) -> PlaybackState {
+        if let Some(ctx) = self.playback_context.lock().unwrap().as_ref() {
+            ctx.state
+        } else {
+            PlaybackState::Stopped
+        }
+    }
+
+    fn start_stream(&mut self) -> Result<(), SynthError> {
+        let host = cpal::default_host();
+        let device = host.default_output_device()
+            .ok_or_else(|| SynthError::AudioError("No output device".to_string()))?;
+                    
+            let config = self.stream_config.clone();
+            let sample_rate = self.sample_rate;
+            let ctx = Arc::clone(&self.playback_context);
+                    
+            let stream = device.build_output_stream(
+                &config,
+                move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                    let mut context_lock = ctx.lock().unwrap();
+                    
+                    if let Some(context) = context_lock.as_mut() {
+                        if context.state != PlaybackState::Playing {
+                            for sample in data.iter_mut() {
+                                *sample = 0.0;
+                            }
+                            return;
+                        }
+                        
+                        for frame in data.chunks_mut(config.channels as usize) {
+                            let mut output = 0.0;
+                            
+                            // Current arrangement
+                            output = Self::synthesize_single_sample(
+                                &context.arrangement,
+                                context.current_sample,
+                                sample_rate,
+                                &context.dynamic_params
+                            );
+                            
+                            // Crossfade target
+                            if let Some(ref mut crossfade) = context.crossfade_state {
+                                let t = (crossfade.progress as f32) / (crossfade.duration_samples as f32);
+                                
+                                let target_sample = Self::synthesize_single_sample(
+                                    &crossfade.target_arrangement,
+                                    context.current_sample,
+                                    sample_rate,
+                                    &context.dynamic_params
+                                );
+                                
+                                output = output * (1.0 - t) + target_sample * t;
+                                crossfade.progress += 1.0;
+                                
+                                // Crossfade complete
+                                if crossfade.progress >= crossfade.duration_samples as f32 {
+                                    context.arrangement = crossfade.target_arrangement.clone();
+                                    context.crossfade_state = None;
+                                }
+                            }
+                            
+                            context.current_sample += 1;
+                            
+                            // Loop/stop logic
+                            if context.loop_enabled {
+                                if let Some(ref loop_point) = context.arrangement.loop_point {
+                                    let pos = context.current_sample as f32 / sample_rate;
+                                    if pos >= loop_point.end {
+                                        context.current_sample = (loop_point.start * sample_rate) as usize;
+                                    }
+                                } else {
+                                    let total_samples = (context.arrangement.total_length * sample_rate) as usize;
+                                    if context.current_sample >= total_samples {
+                                        context.current_sample = 0;
+                                    }
+                                }
+                            } else {
+                                let total_samples = (context.arrangement.total_length * sample_rate) as usize;
+                                if context.current_sample >= total_samples {
+                                    context.state = PlaybackState::Stopped;
+                                }
+                            }
+                            
+                            let final_output = output * context.dynamic_params.master_volume;
+                            for sample in frame.iter_mut() {
+                                *sample = final_output;
+                            }
+                        }
+                    } else {
+                        for sample in data.iter_mut() {
+                            *sample = 0.0;
+                        }
+                    }
+                },
+                |err| eprintln!("Stream error: {}", err),
+                None
+            ).map_err(|e| SynthError::AudioError(e.to_string()))?;
+
+        stream.play().map_err(|e| SynthError::AudioError(e.to_string()))?;
+        self.stream = Some(stream);
+        
+        Ok(())
+    }
+
+    fn synthesize_single_sample(
+        arrangement: &Arrangement,
+        sample_idx: usize,
+        sample_rate: f32,
+        params: &DynamicParameters
+    ) -> f32 {
+        let mut output = 0.0;
+        let current_time = sample_idx as f32 / sample_rate;
+        
+        for (track, start_time, overrides) in &arrangement.tracks {
+            let enabled = params.track_enabled.get(&track.name).copied().unwrap_or(true);
+            if !enabled {
+                continue;
+            }
+            
+            let track_vol = params.track_volumes.get(&track.name).copied().unwrap_or(1.0);
+            
+            if current_time < *start_time {
+                continue;
+            }
+            
+            let track_time = current_time - start_time;
+            
+            let mut cumulative_time = 0.0;
+            let beat_duration = 60.0 / track.tempo;
+            
+            for note in &track.notes {
+                let note_duration = note.duration * beat_duration;
+                let next_time = cumulative_time + note_duration;
+                
+                if track_time >= cumulative_time && track_time < next_time {
+                    let time_in_note = track_time - cumulative_time;
+                    let envelope = Self::calculate_envelope_static(time_in_note, note_duration, &track.instrument);
+                    
+                    let sample = match &track.instrument.source {
+                        InstrumentSource::Synthesized(waveform) => {
+                            let phase = (track_time * note.pitch * params.master_pitch) % 1.0;
+                            waveform.generate_sample(phase)
+                        }
+                        InstrumentSource::Sample(sample_data) => {
+                            Self::interpolate_sample(
+                                sample_data,
+                                time_in_note,
+                                track.instrument.pitch * params.master_pitch
+                            )
+                        }
+                    };
+                    
+                    let volume = track.instrument.volume * overrides.volume.unwrap_or(1.0) * track_vol;
+                    output += sample * envelope * note.velocity * volume;
+                    break;
+                }
+                
+                cumulative_time = next_time;
+            }
+        }
+        
+        output
+    }
     
     pub fn synthesize_arrangement(&self, arrangement: &Arrangement) -> Result<Vec<f32>, SynthError> {
+        self.synthesize_arrangement_private(arrangement, &DynamicParameters::default())
+    }
+
+    fn synthesize_arrangement_private(
+        &self,
+        arrangement: &Arrangement,
+        params: &DynamicParameters,
+    ) -> Result<Vec<f32>, SynthError> {
         let total_samples = (arrangement.total_length * self.sample_rate) as usize;
         let mut buffer = vec![0.0; total_samples];
+        let chunk_size = 1024;
 
         for (track, start_time, overrides) in &arrangement.tracks {
+            let enabled = params.track_enabled.get(&track.name).copied().unwrap_or(true);
+            if !enabled {
+                continue;
+            }
+
+            let track_vol = params.track_volumes.get(&track.name).copied().unwrap_or(1.0);
             let start_sample = (start_time * self.sample_rate) as usize;
+
             let mut t = track.clone();
 
             // Apply overrides
             if let Some(v) = overrides.volume { t.instrument.volume = v; }
-            if let Some(p) = overrides.pitch { t.instrument.pitch = p; }
+            if let Some(p) = overrides.pitch { t.instrument.pitch = p * params.master_pitch; }
             if let Some(tm) = overrides.tempo { t.tempo = tm; }
             if let Some(r) = &overrides.reverb { t.instrument.effects.reverb = Some(r.clone()); }
             if let Some(d) = &overrides.delay { t.instrument.effects.delay = Some(d.clone()); }
             if let Some(x) = &overrides.distortion { t.instrument.effects.distortion = Some(x.clone()); }
 
-            let mut track_buf = vec![0.0; (t.length * self.sample_rate) as usize];
-            self.synthesize_track_into(&mut track_buf, &t, 0);
+            t.instrument.volume *= track_vol;
 
-            if t.instrument.effects.has_any() {
-                let mut fx = EffectsProcessor::new(self.sample_rate);
-                for s in track_buf.iter_mut() {
-                    *s = fx.process(*s, &t.instrument.effects);
-                }
-            }
+            let track_total_samples = (t.length * self.sample_rate) as usize;
+            let mut fx = if t.instrument.effects.has_any() {
+                Some(EffectsProcessor::new(self.sample_rate))
+            } else {
+                None
+            };
 
-            // Mix into main buffer
-            for (i, &s) in track_buf.iter().enumerate() {
-                if let Some(dst) = buffer.get_mut(start_sample + i) {
-                    *dst += s;
+            let mut sample_offset = 0;
+            while sample_offset < track_total_samples {
+                let current_chunk_size = (chunk_size).min(track_total_samples - sample_offset);
+                let mut chunk_buf = vec![0.0; current_chunk_size];
+
+                self.synthesize_track_into(&mut chunk_buf, &t, sample_offset);
+
+                if let Some(fx_processor) = &mut fx {
+                    for s in chunk_buf.iter_mut() {
+                        *s = fx_processor.process(*s, &t.instrument.effects);
+                    }
                 }
+
+                // Mix chunk into main buffer
+                for (i, &s) in chunk_buf.iter().enumerate() {
+                    if let Some(dst) = buffer.get_mut(start_sample + sample_offset + i) {
+                        *dst += s * params.master_volume;
+                    }
+                }
+
+                sample_offset += current_chunk_size;
             }
         }
 
@@ -694,20 +1081,11 @@ impl SynthEngine {
                         let time_in_note = i as f32 / self.sample_rate;
                         let envelope = self.calculate_envelope(time_in_note, actual_duration, &track.instrument);
                         
-                        let src_pos = i as f32 * pitch_adjusted_rate;
-                        let src_idx = src_pos as usize;
-                        let frac = src_pos - src_idx as f32;
-                        
-                        // Linear interpolation
-                        let sample_value = if src_idx < sample_len - 1 {
-                            let s1 = sample_data.samples[src_idx];
-                            let s2 = sample_data.samples[src_idx + 1];
-                            s1 * (1.0 - frac) + s2 * frac
-                        } else if src_idx < sample_len {
-                            sample_data.samples[src_idx]
-                        } else {
-                            0.0
-                        };
+                        let sample_value = Self::interpolate_sample(
+                            sample_data,
+                            time_in_note,
+                            pitch_adjusted_rate
+                        );
                         
                         buffer[sample_idx] += sample_value * envelope * note.velocity * track.instrument.volume;
                     }
@@ -719,8 +1097,33 @@ impl SynthEngine {
         }
     }
 
+    #[inline]
+    fn interpolate_sample(sample_data: &SampleData, time_in_note: f32, pitch_rate: f32) -> f32 {
+        let src_pos = time_in_note * sample_data.sample_rate as f32 * pitch_rate;
+        let src_idx = src_pos as usize;
+        
+        if src_idx >= sample_data.samples.len() {
+            return 0.0;
+        }
+        
+        // Linear interpolation
+        if src_idx < sample_data.samples.len() - 1 {
+            let frac = src_pos - src_idx as f32;
+            let s1 = sample_data.samples[src_idx];
+            let s2 = sample_data.samples[src_idx + 1];
+            s1 * (1.0 - frac) + s2 * frac
+        } else {
+            sample_data.samples[src_idx]
+        }
+    }
+
     // Generate ADSR envelope value at a set time
-    fn calculate_envelope(&self, time: f32, duration: f32, instr: &Instrument) -> f32 {        let attack_end = instr.attack;
+    fn calculate_envelope(&self, time: f32, duration: f32, instr: &Instrument) -> f32 {
+        Self::calculate_envelope_static(time, duration, instr)
+    }
+
+    fn calculate_envelope_static(time: f32, duration: f32, instr: &Instrument) -> f32 {
+        let attack_end = instr.attack;
         let decay_end = attack_end + instr.decay;
         let release_start = duration - instr.release;
 
