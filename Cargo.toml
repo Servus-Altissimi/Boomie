@@ -1,9 +1,9 @@
 [package]
 name = "Boomie"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 authors = ["Servus Altissimi"]
-description = "Music synthesizer module for, ideal for on the fly composition."
+description = "Real-time music synthesizer and composition engine written with dynamic playback control and advanced audio effects. Designed for on the fly compositing."
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/Servus-Altissimi/Boomie"
