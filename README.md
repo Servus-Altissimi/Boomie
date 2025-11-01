@@ -52,7 +52,7 @@ Add Boomie to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-Boomie = "0.1.0"
+Boomie = "0.1.1"
 ```
 
 Or add via cargo:
