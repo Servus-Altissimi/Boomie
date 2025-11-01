@@ -2,6 +2,21 @@
 name = "Boomie"
 version = "0.1.0"
 edition = "2024"
+authors = ["Servus Altissimi"]
+description = "Music synthesizer module for, ideal for on the fly composition."
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/Servus-Altissimi/Boomie"
+keywords = ["audio", "music", "synthesizer"]
+categories = ["multimedia::audio"]
+exclude = [
+    "target/*",
+    "temp",
+    "song.bmi",
+    "melody.mel",
+    ".gitignore",
+]
+
 
 [dependencies]
 cpal = "0.16.0"
