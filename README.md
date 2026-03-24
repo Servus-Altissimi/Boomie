@@ -1,23 +1,30 @@
-# Boomie
+<div align="center">
+  <table border="0" cellspacing="0" cellpadding="0">
+    <tr>
+      <td><img src="https://files.catbox.moe/qxf2b3.svg" alt="Boomie Logo" height="72" /></td>
+      <td><h1>&nbsp;Boomie</h1></td>
+    </tr>
+  </table>
+  <p><em>Compose, sculpt, and play music in real time!</em></p>
 
-```
- ______   _______  _______  _______ _________ _______ 
-(  ___ \ (  ___  )(  ___  |(       )\__   __/(  ____ \
-| (   ) )| (   ) || (   ) || () () |   ) (   | (    \/
-| (__/ / | |   | || |   | || || || |   | |   | (__    
-|  __ (  | |   | || |   | || |(_)| |   | |   |  __)   
-| (  \ \ | |   | || |   | || |   | |   | |   | (      
-| )___) )| (___) || (___) || )   ( |___) (___| (____/\
-|/ \___/ (_______)(_______)|/     \|\_______/(_______/
+  [![Crates.io](https://img.shields.io/crates/v/Boomie?style=for-the-badge&color=a855f7)](https://crates.io/crates/Boomie)
+  [![Downloads](https://img.shields.io/crates/d/Boomie?style=for-the-badge&label=downloads&color=ec4899)](https://crates.io/crates/Boomie)
+  [![License](https://img.shields.io/badge/license-MIT-green?style=for-the-badge)](LICENSE)
+  [![Rust](https://img.shields.io/badge/rust-1.89+-orange?style=for-the-badge)](https://www.rust-lang.org/)
 
-```
+</div>
 
-[![Crates.io](https://img.shields.io/crates/v/Boomie.svg)](https://crates.io/crates/Boomie)
+## Roadmap
+- [x] WGSL Shader support
+- [ ] Examples
+- [ ] Full WASM support
+- [ ] Live-reload mode
+- [ ] MIDI-support
+- [ ] Easy file exporting
 
-Real-time music synthesizer and composition engine written with dynamic playback control and advanced audio effects. Designed for on the fly compositing.
+## Why?
 
-## Why
-Boomie is made for the [Liefde.](https://github.com/servus-altissimi/Liefde.) game engine. The main reason for including a music synthesizer in a game engine is to enable dynamic control over the soundtrack. Of course this module can be used outside the context of a videogame, which is why I released it as a seperate crate. 
+This project originally came to be for my game engine "Liefde". This project has long been discontinued however. Now it is meant to be an extensive synthesizer for any audio project. Most new features will be targeted towards supplementing my wip audiovisitory tool [UmbraFex](https://github.com/servus-altissimi/umbrafex)
 
 ## Features
 
