@@ -1,6 +1,6 @@
 [package]
 name = "Boomie"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 authors = ["Servus Altissimi"]
 description = "Real-time music synthesizer and composition engine written with dynamic playback control and advanced audio effects. Designed for on the fly compositing."
