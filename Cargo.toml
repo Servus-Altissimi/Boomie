@@ -1,19 +1,16 @@
 [package]
-name = "Boomie"
+name = "boomie"
 version = "0.1.3"
 edition = "2024"
 authors = ["Servus Altissimi"]
-description = "Real-time music synthesizer and composition engine written with dynamic playback control and advanced audio effects. Designed for on the fly compositing."
+description = "Real-time music synthesizer and composition engine with dynamic playback control, advanced audio effects, and optional GPU-accelerated synthesis via WGPU. Designed for on the fly compositing."
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/Servus-Altissimi/Boomie"
-keywords = ["audio", "music", "synthesizer"]
+keywords = ["audio", "music", "synthesizer", "gpu", "wgpu", "web", "wasm"]
 categories = ["multimedia::audio"]
 exclude = [
     "target/*",
-    "temp",
-    "song.bmi",
-    "melody.mel",
     ".gitignore",
 ]
 
