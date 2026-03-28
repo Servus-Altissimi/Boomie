@@ -16,11 +16,8 @@
 
 ## Roadmap
 - [x] WGSL Shader support
-- [ ] Examples
-- [ ] Full WASM support
-- [ ] Live-reload mode
-- [ ] MIDI-support
-- [ ] Easy file exporting
+- [x] WASM Support
+- [ ] MIDI support
 
 ## Why?
 
@@ -44,6 +41,11 @@ This project originally came to be for my game engine "Liefde". This project has
 - **Filters**: Biquad filters supporting lowpass, highpass, and bandpass modes with cutoff and resonance control
 - **Effects chain**: Process audio through multiple effects in sequence
 
+### GPU Acceleration
+- **WGPU-powered synthesis**: Offload waveform generation (Sine, Square, Triangle, Sawtooth) to the GPU 
+- **Custom WGSL shaders**: Load and dispatch shaders for fully custom synthesis pipelines
+- **Automatic CPU fallback**: Sample-based instruments, Noise, and all stateful effects run on the CPU silently
+
 ### Dynamic Playback Control
 - **Real-time parameter adjustment**: Change volume, pitch, and track states during playback
 - **Crossfading**: Smooth transitions between different arrangements
@@ -56,20 +58,17 @@ This project originally came to be for my game engine "Liefde". This project has
 ## Installation
 
 Add Boomie to your `Cargo.toml`:
-
 ```toml
 [dependencies]
 Boomie = "0.1.2"
 ```
 
 Or add via cargo:
-
 ```bash
 cargo add Boomie
 ```
 
 ## Example
-
 ```rust
 use boomie::*;
 use std::error::Error;
@@ -206,7 +205,6 @@ Silence for specified duration in beats.
 | Distortion | `distortion: DRIVE, TONE, WET` | Drive: 1.0+<br>Tone: 0.0-1.0<br>Wet: 0.0-1.0 |
 
 #### Example
-
 ```
 name: bass
 tempo: 120
@@ -240,7 +238,6 @@ reverb: 0.3, 0.4, 0.2, 0.9
 | `loop:` | Arrangement loop points: `start, end` | none |
 
 #### Tracks
-
 ```
 track: MELODY_FILE, START_TIME [, OVERRIDES...]
 ```
@@ -265,7 +262,6 @@ track: MELODY_FILE, START_TIME [, OVERRIDES...]
 | Distortion | `distortion=DRIVE:TONE:WET` or `dist=...` | Add/override distortion |
 
 #### Example
-
 ```
 name: Song
 master_tempo: 120
@@ -314,3 +310,63 @@ Notes follow standard music notations:
 | **Delay** | Circular buffer with feedback loop |
 | **Distortion** | Cubic waveshaping with tone control lowpass filter |
 | **Filters** | Biquad IIR filters with proper coefficient calculation |
+
+## GPU Acceleration
+
+Boomie includes an optional GPU-accelerated synthesis engine powered by [WGPU](https://wgpu.rs/). Enable it with the `gpu` feature flag:
+```toml
+[dependencies]
+Boomie = { version = "0.1", features = ["gpu"] }
+```
+
+### Architecture
+
+| Layer | Responsibility |
+|-------|----------------|
+| **GPU path** | Synthesized waveforms (Sine, Square, Triangle, Sawtooth) |
+| **CPU fallback** | Sample-based instruments and the Noise waveform |
+| **CPU post-process** | Stateful effects (reverb, delay, distortion, filter) |
+| **CPU post-process** | Arrangement-level fade and normalisation |
+
+### GpuSynthEngine API
+
+| Function | Description |
+|----------|-------------|
+| `GpuSynthEngine::new()` | Initialise wgpu instance, adapter, and device (high-performance preference) |
+| `load_sample(name, path)` | Load a `.wav` file (delegates to CPU cache) |
+| `load_melody(name, path)` | Parse and cache a `.mel` file |
+| `load_arrangement(path)` | Load a `.bmi` arrangement file |
+| `get_sample_cache()` | Get reference to loaded samples |
+| `synthesize_arrangement(arrangement)` | Render arrangement to `Vec<f32>` using GPU where possible |
+| `synthesize_arrangement_with_params(arrangement, params)` | Same, with runtime `DynamicParameters` |
+| `synthesize_audio_shader(name, samples, rate, duration)` | Dispatch a raw named WGSL shader and return stereo `(left, right)` buffers |
+
+### Custom Shaders
+
+Shaders can be loaded from disk and referenced by name. The built-in fallback shader (`__boomie_synth`) is auto-generated from the active waveform set. The built-in name can be shadowed by loading a custom shader under `DEFAULT_SYNTH_SHADER_NAME`.
+
+Shaders dispatched via `synthesize_audio_shader` must expose the `AudioUniforms` binding contract described below.
+
+### AudioUniforms Binding Contract
+
+Custom shaders must bind a uniform buffer at `@group(0) @binding(0)` matching this layout:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `duration` | `f32` | Total duration in seconds |
+| `sample_rate` | `f32` | Sample-rate in Hz |
+| `num_samples` | `u32` | Total number of samples to generate |
+| `_pad` | `f32` | Padding for alignment |
+
+The storage output buffer must be bound at `@group(0) @binding(1)` as a read/write `array<f32>`, sized to at least `num_samples * 2` elements.
+
+### Waveform GPU Eligibility
+
+| Waveform | GPU Path | Notes |
+|----------|----------|-------|
+| Sine | Yes | |
+| Square | Yes | |
+| Triangle | Yes | |
+| Sawtooth | Yes | |
+| Noise | No | Stateful RNG has no GPU equivalent as far as I know|
+| Sample-based | No | CPU only |
