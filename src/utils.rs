@@ -1,5 +1,7 @@
 use crate::error::SynthError;
 
+// TODO: Use standard MIDI formula
+
 pub fn parse_note(note_str: &str) -> Result<f32, SynthError> {
     let note_str = note_str.to_uppercase();
     let mut freq = match note_str.chars().next() {
@@ -34,4 +36,5 @@ pub fn parse_note(note_str: &str) -> Result<f32, SynthError> {
     }
 
     Ok(freq)
+
 }

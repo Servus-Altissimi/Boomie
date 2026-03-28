@@ -102,6 +102,22 @@ impl SynthEngine {
         }
     }
 
+    // Used by GpuSynthEngine to delegate CPU-side work without requiring audio hardware, internal only.
+    pub(crate) fn new_offline(sample_rate: f32) -> Self {
+        SynthEngine {
+            mel_cache:    HashMap::new(),
+            sample_cache: HashMap::new(),
+            stream_config: StreamConfig {
+                channels:    2,
+                sample_rate: cpal::SampleRate(sample_rate as u32),
+                buffer_size: cpal::BufferSize::Default,
+            },
+            sample_rate,
+            playback_context: Arc::new(Mutex::new(None)),
+            stream: None,
+        }
+    }
+
     pub fn get_sample_cache(&self) -> &HashMap<String, SampleData> {
         &self.sample_cache
     }
@@ -446,8 +462,8 @@ impl SynthEngine {
         }
         Ok(buffer)
     }
-
-    fn synthesize_track_into(&self, buffer: &mut [f32], track: &MelodyTrack, start_sample: usize) {
+ 
+    pub(crate) fn synthesize_track_into(&self, buffer: &mut [f32], track: &MelodyTrack, start_sample: usize) {
         let mut cur = 0usize;
         let beat_dur = 60.0 / track.tempo;
         for element in &track.sequence {

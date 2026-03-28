@@ -17,11 +17,20 @@ exclude = [
     ".gitignore",
 ]
 
+[features]
+default = []
+gpu = ["dep:wgpu", "dep:bytemuck", "dep:futures-channel"]
 
 [dependencies]
-cpal = "0.16.0"
+cpal     = "0.16"
 fastrand = "2.3.0"
-hound = "3.5.1"
+hound    = "3.5.1"
+wgpu   	 = { version = "28", optional = true }
+bytemuck = { version = "1",  features = ["derive"], optional = true }
+futures-channel = { version = "0.3", optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+gloo-timers = { version = "0.3", features = ["futures"] }
 
 [lib]
 name = "boomie"
