@@ -1,3 +1,7 @@
+> # This project has been renamed to [MingShi](https://github.com/Servus-Altissimi/MingShi).
+> The name "Boomie" was published to crates.io with a capital B, which is unconventional, and to be honest: I just dislike the name. Since this is a solo-project, renaming it now rather than later made more sense than carrying it forward begrudgingly.
+> This repository won't be renamed, it's linked on my CV and I'd rather not leave a broken link there. Head to MingShi for all development.
+
 <div align="center">
   <table border="0" cellspacing="0" cellpadding="0">
     <tr>
